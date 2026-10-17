@@ -50,7 +50,7 @@ fn main(in: FragmentInput) -> @location(0) vec4f
     let far = camUniform.screenDim.w;
 
     var x = u32(in.fragPos.x / screenW * f32(X));
-    var y = u32(1.0 - in.fragPos.y / screenH * f32(Y));
+    var y = u32((1.0 - in.fragPos.y / screenH) * f32(Y));
     let depth = -(camUniform.viewMat * vec4f(in.pos, 1.0)).z;     
     var z = u32(log(depth / near) / log(far / near) * f32(Z));
 
