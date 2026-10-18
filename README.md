@@ -3,19 +3,16 @@ WebGPU Forward+ and Clustered Deferred Shading
 
 **University of Pennsylvania, CIS 5650: GPU Programming and Architecture, Project 4**
 
-* Shanshan
+* Shanshan Wu
 * Tested on: **Google Chrome 155.0.8059.80 (Official Build) (64-bit)** on
  Windows 11, AMD Ryzen 9 270 @ ~4.0GHz, 32GB RAM, NVIDIA GeForce RTX 5070 Laptop GPU (personal laptop)
 
 
 ### Live Demo
 
-[![](img/thumb.png)](https://popi-x.github.io/Project4-WebGPU-Forward-Plus-and-Clustered-Deferred)
+[![](img/clustered.gif)](https://popi-x.github.io/Project4-WebGPU-Forward-Plus-and-Clustered-Deferred)
 
-### Demo Video/GIF
-
-<!-- TODO: record 30+ seconds showing Naive / Forward+ / Clustered Deferred and changing the light count -->
-![](img/demo.gif)
+[Demo](https://popi-x.github.io/Project4-WebGPU-Forward-Plus-and-Clustered-Deferred)
 
 ---
 
@@ -29,7 +26,6 @@ This project renders the Sponza atrium lit by up to 5000 moving point lights in 
 | **Forward+** | clustering compute + 1 render pass | only the lights in the fragment's cluster |
 | **Clustered Deferred** | clustering compute + G-buffer pass + fullscreen lighting pass | only the lights in the pixel's cluster, once per pixel |
 
-<!-- TODO: screenshot of the scene -->
 ![](img/screenshot.png)
 
 ---
@@ -38,15 +34,13 @@ This project renders the Sponza atrium lit by up to 5000 moving point lights in 
 
 ### 1. Light Clustering (shared by Forward+ and Clustered Deferred)
 
-The view frustum is divided into a **16 × 9 × 24** grid of clusters (3456 clusters). A compute shader (`clustering.cs.wgsl`, one thread per cluster) builds each cluster's light list every frame.
+The view frustum is divided into a **32 × 18 × 48** grid of clusters (27648 clusters). A compute shader (`clustering.cs.wgsl`, one thread per cluster) builds each cluster's light list every frame.
 
-- **XY**: the screen is split evenly into 16 × 9 tiles in NDC.
+- **XY**: the screen is split evenly into 32 × 18 tiles in NDC.
 - **Z**: depth is sliced **logarithmically** between near and far:
-  `zNear_k = near · (far / near)^(k / Z)`. This keeps clusters roughly cube-shaped, since screen tiles get larger with distance.
+  `zNear_k = near · (far / near)^(k / Z)`. 
 - **Cluster bounds**: the 4 NDC corners of each tile are un-projected with `invProjMat` and scaled to the slice's near/far depth, giving 8 view-space points. Their min/max is the cluster's **AABB**.
 - **Light assignment**: each light's position is transformed to view space and tested against the AABB with a **sphere–AABB test** (clamp the center into the box, compare squared distance with r²). Up to **256** light indices are stored per cluster.
-
-<!-- TODO (optional): debug view, e.g. number of lights per cluster as a heatmap -->
 
 ### 2. Forward+
 
@@ -66,72 +60,99 @@ The scene is drawn once. In the fragment shader, each fragment:
 
 2. **Fullscreen pass**: one screen-covering triangle (generated from `@builtin(vertex_index)`, no vertex buffer). Each pixel reads the G-buffer with `textureLoad`, finds its cluster, and shades with the cluster's lights. Every pixel is shaded exactly once.
 
-<!-- TODO (optional): images of the 3 G-buffer targets -->
-
 ---
 
 ## Performance Analysis
 
-**Setup:** (TODO: resolution, e.g. 1920 × 1080), cluster grid 16 × 9 × 24, max 256 lights per cluster, light radius 2. Frame times are in **milliseconds** (lower is better), read from the stats panel and averaged over (TODO) seconds with the camera at the default position.
-
-> Note: Chrome limits the frame rate to the display refresh rate, so any frame time at ~(TODO: 16.7) ms may be capped.
+**Setup:** Canvas resolution 2878 × 1556. Cluster grid 16 × 9 × 24 for all results except the grid size test and the optimization section, at most 256 lights per cluster, light radius 2, camera at the default position. Frame time is measured on the GPU side: the time from just before `draw()` until `device.queue.onSubmittedWorkDone()` resolves, averaged over 60 frames. This measurement is not limited by vsync.
 
 ### Frame time vs. number of lights
 
 | Lights | Naive (ms) | Forward+ (ms) | Clustered Deferred (ms) |
 |---:|---:|---:|---:|
-| 500 | TODO | TODO | TODO |
-| 1000 | TODO | TODO | TODO |
-| 2000 | TODO | TODO | TODO |
-| 3000 | TODO | TODO | TODO |
-| 5000 | TODO | TODO | TODO |
+| 500 | 712 | 60 | 6 |
+| 1000 | too slow | 120 | 20 |
+| 2000 | / | 216 | 67 |
+| 3000 | / | 287 | 85 |
+| 5000 | / | 332 | 100 |
 
-<!-- TODO: line chart of the table above -->
 ![](img/perf_lights.png)
 
 ### Is one of them faster?
 
-TODO: Which renderer is fastest at low / high light counts, and by how much.
+Clustered Deferred is the fastest at every light count. At 500 lights it takes 6 ms, about 10× faster than Forward+ at 60 ms and over 100× faster than Naive at 712 ms. At 5000 lights Clustered Deferred takes 100 ms while Forward+ takes 332 ms, about 3.3× slower.
+
+Clustered Deferred also adds far less time per light. From 500 to 5000 lights its frame time increases by 94 ms, while Forward+ increases by 272 ms. 
 
 ### Why?
 
-TODO. Points to cover:
-- **Naive vs. clustered**: Naive evaluates every light for every fragment (cost ≈ fragments × lights). Clustering reduces this to the few lights near each fragment, so the cost grows much more slowly with the light count.
-- **Forward+ vs. Clustered Deferred**: Forward+ shades every fragment that passes the depth test at the time it's drawn, including surfaces that are later covered (overdraw). The alpha-tested `discard` in the fragment shader also prevents early-z. Clustered Deferred only writes cheap G-buffer data in the geometry pass and shades each pixel once.
-- **Cost of Deferred**: 3 extra screen-sized textures written and read every frame (memory and bandwidth), plus an extra pass.
+**Naive vs. clustered.** Naive loops over every light for every fragment, so its cost grows with fragments times lights. Clustering limits each fragment to the lights that can actually reach it. With a light radius of 2, most clusters only overlap a small fraction of the scene's lights.
 
-### Better at certain workloads? Benefits and tradeoffs
+**Forward+ vs. Clustered Deferred.** Sponza has a lot of overdraw: columns, arches and curtains overlap on screen. Forward+ runs the full lighting loop for every fragment that passes the depth test at the moment it is drawn, including fragments that a closer surface covers later. The fragment shader also uses `discard` for alpha testing, which prevents the GPU from rejecting hidden fragments before shading. Clustered Deferred only writes position, normal and albedo in the geometry pass, which is cheap. The lighting loop then runs once per pixel in the fullscreen pass. Since lighting dominates the cost, the work saved grows with the number of lights.
+
+
+### Frame time vs. cluster grid size
+
+All runs use 2000 lights at the same resolution and camera position. Only `clusterX`, `clusterY` and `clusterZ` in `shaders.ts` change.
+
+| Grid | Clusters | Forward+ (ms) | Clustered Deferred (ms) |
+|---|---:|---:|---:|
+| 4 × 2 × 6 | 48 | 388 | 97 |
+| 8 × 4 × 12 | 384 | 344 | 92 |
+| 16 × 9 × 24 | 3456 | 216 | 67 |
+| 32 × 18 × 48 | 27648 | 140 | 50 |
+
+![](img/perf_grid.png)
+
+Within this range, a finer grid is always faster. Going from 48 to 27648 clusters cuts Forward+ from 388 ms to 140 ms and Clustered Deferred from 97 ms to 50 ms.
+
+**Why finer is faster.** Smaller clusters overlap fewer lights, so each fragment loops over a shorter list. Lighting runs once per shaded fragment, which is millions of times per frame at this resolution. The clustering pass runs once per cluster. Even at 27648 clusters it does far less work than the lighting loop it saves.
+
+**Forward+ benefits more.** Forward+ drops 2.8× while Clustered Deferred drops 1.9×. Forward+ runs the lighting loop for every overlapping fragment, so a shorter light list saves time several times per pixel. Clustered Deferred saves it only once per pixel.
+
+**Coarse grids are also wrong, not just slow.** The image below shows visible tile edges with a coarse grid and 2000 lights. They come from the 256-light cap.
+
+![](img/obviousGrid.png)
+
+
+With 16 × 9 × 24 or finer, each cluster overlaps far fewer than 256 lights, nothing is dropped, and the edges disappear. A larger `maxLightsPerCluster` would also hide them, at the cost of a bigger cluster buffer.
+
+**Cost of a finer grid.** The cluster buffer stores 257 integers per cluster. At 32 × 18 × 48 that is about 28 MB, compared with about 3.5 MB at 16 × 9 × 24. A finer grid also means more compute threads, so the gain will flatten once the lighting work is no longer the bottleneck.
+
+### Best and worst cases for clustering
+
+The best case is many small lights spread across a deep scene. Each cluster then overlaps only a few lights and most of the lighting work is skipped. The worst case is a few lights with a large radius, or lights packed into one spot. Most clusters then overlap most of the lights, so the shading cost is close to Naive while the clustering pass still adds its own cost. Packed lights can also exceed the 256 cap and drop lights.
+
+### Benefits and tradeoffs
 
 | | Forward+ | Clustered Deferred |
 |---|---|---|
-| Many lights, lots of overdraw | TODO | TODO |
-| Few lights / simple scenes | TODO | TODO |
-| Memory / bandwidth | TODO | TODO |
-| Transparency | TODO (works naturally) | TODO (G-buffer stores one surface per pixel) |
-| MSAA | TODO | TODO |
-| Material flexibility | TODO | TODO (limited to what the G-buffer stores) |
+| Many lights, lots of overdraw | Shades hidden fragments, slows down quickly | Shades each pixel once, scales well |
+| Few lights, simple scenes | Little overdraw to waste, one fewer pass | G-buffer cost may outweigh the savings |
+| Memory and bandwidth | Only a depth buffer | Three extra screen-sized targets per frame |
+| Transparency | Works naturally, surfaces are shaded in draw order | G-buffer holds one surface per pixel, transparent objects need a separate forward pass |
+| MSAA | Works with standard hardware MSAA | Needs multisampled G-buffer targets, which multiplies memory |
+| Material flexibility | Each material can run its own shading code | Limited to the data stored in the G-buffer |
 
-### (Optional) Cluster grid size
-
-| Grid | Forward+ (ms) | Clustered Deferred (ms) |
-|---|---:|---:|
-| 8 × 4 × 12 | TODO | TODO |
-| 16 × 9 × 24 | TODO | TODO |
-| 32 × 18 × 48 | TODO | TODO |
-
-TODO: Too few clusters → each holds many lights; too many → clustering compute and memory cost increase.
+In short, Forward+ is the better fit for scenes with transparency, MSAA or varied materials, or when memory is tight. Clustered Deferred is the better fit for opaque scenes with many lights and heavy overdraw, like Sponza.
 
 ### Optimizations
 
-<!-- TODO: for each optimization, before / after in ms -->
+**Finer cluster grid.** Based on the grid size test above, I changed the default grid from 16 × 9 × 24 to 32 × 18 × 48. Measured with 2000 lights:
 
-| Change | Before (ms) | After (ms) |
-|---|---:|---:|
-| TODO | TODO | TODO |
+| Renderer | Before, 16 × 9 × 24 (ms) | After, 32 × 18 × 48 (ms) | Speedup |
+|---|---:|---:|---:|
+| Forward+ | 216 | 140 | 1.5× |
+| Clustered Deferred | 67 | 50 | 1.3× |
+
+The tradeoff is memory. The cluster buffer grows from about 3.5 MB to about 28 MB.
 
 ### Possible further optimizations
 
-- TODO (e.g. pack the G-buffer into fewer / smaller textures, reconstruct position from depth, octahedral normal encoding, compute-shader lighting pass)
+- **Smaller G-buffer.** Reconstruct world position from the depth buffer and `invProjMat` instead of storing it. Encode the normal into two components with octahedral encoding and pack everything into a single `rgba32uint` target. This cuts bandwidth in the fullscreen pass.
+- **Compute-shader lighting pass.** Replace the fullscreen triangle with a compute pass that reads the G-buffer and writes the output directly.
+- **Faster clustering.** Use shared memory to load lights in batches per workgroup, or cull lights per depth slice first and then per tile.
+- **Avoid wasted shading in Forward+.** Add a depth prepass so the main pass only shades visible fragments.
 
 ---
 
