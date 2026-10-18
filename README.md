@@ -110,12 +110,10 @@ Within this range, a finer grid is always faster. Going from 48 to 27648 cluster
 
 **Forward+ benefits more.** Forward+ drops 2.8× while Clustered Deferred drops 1.9×. Forward+ runs the lighting loop for every overlapping fragment, so a shorter light list saves time several times per pixel. Clustered Deferred saves it only once per pixel.
 
-**Coarse grids are also wrong, not just slow.** The image below shows visible tile edges with a coarse grid and 2000 lights. They come from the 256-light cap.
+**Coarse grids also look wrong** The image below shows visible tile edges with a coarse grid and 2000 lights. They come from the 256-light cap.
 
 ![](img/obviousGrid.png)
 
-
-With 16 × 9 × 24 or finer, each cluster overlaps far fewer than 256 lights, nothing is dropped, and the edges disappear. A larger `maxLightsPerCluster` would also hide them, at the cost of a bigger cluster buffer.
 
 **Cost of a finer grid.** The cluster buffer stores 257 integers per cluster. At 32 × 18 × 48 that is about 28 MB, compared with about 3.5 MB at 16 × 9 × 24. A finer grid also means more compute threads, so the gain will flatten once the lighting work is no longer the bottleneck.
 
